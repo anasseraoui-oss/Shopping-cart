@@ -18,22 +18,17 @@
       raw: apk add --no-cache docker || true
 
     - name: Arrêter l'ancien conteneur
-      raw: docker stop {{ app_name }} || true
+      raw: /usr/bin/docker stop {{ app_name }} || true
 
     - name: Supprimer l'ancien conteneur
-      raw: docker rm {{ app_name }} || true
+      raw: /usr/bin/docker rm {{ app_name }} || true
 
     - name: Lancer le nouveau conteneur
-      raw: |
-        docker run -d \
-          --name {{ app_name }} \
-          -p {{ app_port }}:{{ app_port }} \
-          --restart always \
-          {{ docker_image }}
+      raw: /usr/bin/docker run -d --name {{ app_name }} -p {{ app_port }}:{{ app_port }} --restart always {{ docker_image }}
 
     - name: Vérifier le déploiement
-      raw: docker ps | grep {{ app_name }}
+      raw: /usr/bin/docker ps | grep {{ app_name }}
 
     - name: Afficher le résultat
       debug:
-        msg: "Application déployée avec succès sur le port {{ app_port }}"
+        msg: "Application déployée avec succès sur le port {{ app_port }} !"
