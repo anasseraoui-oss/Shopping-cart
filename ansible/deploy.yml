@@ -1,30 +1,49 @@
 ---
 - name: Déploiement Shopping Cart avec Ansible
   hosts: webservers
-  become: no
+  become: yes          # Requis pour installer des paquets et gérer Docker
   connection: ssh
 
   vars:
     app_name: shopping-cart
     app_port: 8070
+    docker_image: "anasseraoui/shopping-cart:latest"
 
   tasks:
-    - name: Afficher le début du déploiement
-      debug:
-        msg: "Déploiement de {{ app_name }} sur {{ inventory_hostname }}"
+    - name: 1. Vérifier si Docker est déjà installé
+      command: docker --version
+      register: docker_check
+      ignore_errors: yes
+      changed_when: false
 
-    - name: Vérifier la connexion au node
-      raw: echo "Node {{ inventory_hostname }} accessible !"
+    - name: 2. Installer Docker si absent (Ubuntu/Debian)
+      apt:
+        name: docker.io
+        state: present
+        update_cache: yes
+      when: docker_check.rc != 0
 
-    - name: Vérifier le système
-      raw: uname -a
+    - name: 3. S'assurer que le service Docker est démarré
+      service:
+        name: docker
+        state: started
+        enabled: yes
+      when: docker_check.rc != 0
 
-    - name: Vérifier que Python est disponible
-      raw: python3 --version
+    - name: 4. Nettoyage - Arrêter l'ancien conteneur s'il existe
+      shell: "docker stop {{ app_name }} || true"
 
-    - name: Afficher les infos du node
-      raw: hostname && whoami
+    - name: 5. Nettoyage - Supprimer l'ancien conteneur s'il existe
+      shell: "docker rm {{ app_name }} || true"
 
-    - name: Afficher le résultat final
-      debug:
-        msg: "Application {{ app_name }} déployée avec succès sur {{ inventory_hostname }} port {{ app_port }} !"
+    - name: 6. Pull - Télécharger la dernière version de l'image depuis Docker Hub
+      shell: "docker pull {{ docker_image }}"
+
+    - name: 7. Run - Lancer le conteneur Spring Boot
+      shell: |
+        docker run -d \
+          --name {{ app_name }} \
+          -p {{ app_port }}:8070 \
+          -p 8071:8071 \
+          --restart always \
+          {{ docker_image }}
