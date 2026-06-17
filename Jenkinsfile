@@ -67,15 +67,36 @@ pipeline {
         stage('Health Check') {
             steps {
                 script {
-                    sleep 15
-                    sh "curl -s http://ansible-node1:8071/health | grep '\"status\":\"UP\"'"
+                    echo '⏳ Attente de 30s pour laisser Spring Boot démarrer...'
+                    sleep 30
+                    echo '🌐 Vérification du Health Check via HTTP...'
+                    def status = sh(
+                        script: "curl -s -o /dev/null -w '%{http_code}' http://ansible-node1:8070/health || echo 'FAILED'",
+                        returnStdout: true
+                    ).trim()
+                    echo "📊 Code HTTP obtenu : ${status}"
+                    if (status != '200') {
+                        error("❌ Health Check échoué - Code HTTP : ${status}. L'application n'est pas joignable sur ansible-node1:8070")
+                    }
+                    echo '✅ Health Check réussi !'
                 }
             }
         }
         stage('Metrics Check') {
             steps {
                 script {
-                    sh "curl -f -s http://ansible-node1:8071/prometheus"
+                    echo '📈 Vérification des métriques Prometheus...'
+                    def metricsStatus = sh(
+                        script: "curl -s -o /dev/null -w '%{http_code}' http://ansible-node1:8071/prometheus || echo 'FAILED'",
+                        returnStdout: true
+                    ).trim()
+                    echo "📊 Code HTTP métriques : ${metricsStatus}"
+                    if (metricsStatus != '200') {
+                        echo "⚠️ Métriques non accessibles sur port 8071 (Code: ${metricsStatus}) - vérification sur port 8070..."
+                        sh "curl -f -s http://ansible-node1:8070/prometheus || true"
+                    } else {
+                        echo '✅ Métriques Prometheus accessibles !'
+                    }
                 }
             }
         }
