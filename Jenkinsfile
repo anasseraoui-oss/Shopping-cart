@@ -3,6 +3,7 @@ pipeline {
     tools {
         jdk 'jdk-11'
         maven 'maven3'
+        ansible 'ansible'
     }
     environment {
         DOCKER_IMAGE = "anasseraoui/shopping-cart"
@@ -54,6 +55,17 @@ pipeline {
                 }
             }
         }
+        stage('Ansible Preparation') {
+            steps {
+                script {
+                    // Connexion au réseau et Préparation Python
+                    echo "🔗 Connecting Jenkins container to ansible-network..."
+                    sh "docker network connect ansible-network \$(hostname) || true"
+                    echo "🐍 Installing python3 on target node (ansible-node1) for Ansible..."
+                    sh "docker exec -u 0 ansible-node1 sh -c 'apt-get update && apt-get install -y python3 || apk add --no-cache python3'"
+                }
+            }
+        }
         stage('Ansible Deploy') {
             steps {
                 ansiblePlaybook(
@@ -67,18 +79,26 @@ pipeline {
         stage('Health Check') {
             steps {
                 script {
-                    echo '⏳ Attente de 30s pour laisser Spring Boot démarrer...'
-                    sleep 30
-                    echo '🌐 Vérification du Health Check via HTTP...'
-                    def status = sh(
-                        script: "curl -s -o /dev/null -w '%{http_code}' http://ansible-node1:8070/health || echo 'FAILED'",
-                        returnStdout: true
-                    ).trim()
-                    echo "📊 Code HTTP obtenu : ${status}"
-                    if (status != '200') {
-                        error("❌ Health Check échoué - Code HTTP : ${status}. L'application n'est pas joignable sur ansible-node1:8070")
+                    echo '⏳ Attente du démarrage de Spring Boot (Polling sur 100s)...'
+                    def isReady = false
+                    for (int i = 0; i < 10; i++) {
+                        sleep(10)
+                        def status = sh(
+                            script: "docker exec ansible-node1 curl -s -o /dev/null -w '%{http_code}' http://localhost:8070/health || echo '000'",
+                            returnStdout: true
+                        ).trim()
+                        echo "📊 Tentative ${i+1}/10 - Code HTTP : ${status}"
+                        if (status == '200') { 
+                            isReady = true
+                            echo '✅ Health Check réussi ! L\'application est joignable.'
+                            break 
+                        }
                     }
-                    echo '✅ Health Check réussi !'
+                    if (!isReady) {
+                        echo '❌ Health Check échoué. Récupération des logs du conteneur :'
+                        sh "docker exec ansible-node1 docker logs shopping-cart"
+                        error "Application unreachable after 100s"
+                    }
                 }
             }
         }
@@ -87,13 +107,13 @@ pipeline {
                 script {
                     echo '📈 Vérification des métriques Prometheus...'
                     def metricsStatus = sh(
-                        script: "curl -s -o /dev/null -w '%{http_code}' http://ansible-node1:8071/prometheus || echo 'FAILED'",
+                        script: "docker exec ansible-node1 curl -s -o /dev/null -w '%{http_code}' http://localhost:8071/prometheus || echo 'FAILED'",
                         returnStdout: true
                     ).trim()
                     echo "📊 Code HTTP métriques : ${metricsStatus}"
                     if (metricsStatus != '200') {
                         echo "⚠️ Métriques non accessibles sur port 8071 (Code: ${metricsStatus}) - vérification sur port 8070..."
-                        sh "curl -f -s http://ansible-node1:8070/prometheus || true"
+                        sh "docker exec ansible-node1 curl -s http://localhost:8070/prometheus || true"
                     } else {
                         echo '✅ Métriques Prometheus accessibles !'
                     }
