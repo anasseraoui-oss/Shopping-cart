@@ -61,6 +61,8 @@ pipeline {
                     // Connexion au réseau et Préparation Python
                     echo "🔗 Connecting Jenkins container to ansible-network..."
                     sh "docker network connect ansible-network \$(hostname) || true"
+                    echo "🔑 Installing sshpass on Jenkins container for Ansible password auth..."
+                    sh "docker exec -u 0 \$(hostname) sh -c 'apt-get update && apt-get install -y sshpass' || true"
                     echo "🐍 Installing python3 on target node (ansible-node1) for Ansible..."
                     sh "docker exec -u 0 ansible-node1 sh -c 'apt-get update && apt-get install -y python3 || apk add --no-cache python3'"
                 }
@@ -71,7 +73,6 @@ pipeline {
                 ansiblePlaybook(
                     playbook: 'ansible/deploy.yml',
                     inventory: 'inventory.ini',
-                    credentialsId: 'ansible-ssh',
                     become: false,
                     colorized: true
                 )
