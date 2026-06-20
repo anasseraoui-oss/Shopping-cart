@@ -72,6 +72,7 @@ pipeline {
                     playbook: 'ansible/deploy.yml',
                     inventory: 'inventory.ini',
                     credentialsId: 'ansible-ssh',
+                    become: false,
                     colorized: true
                 )
             }
@@ -84,7 +85,7 @@ pipeline {
                     for (int i = 0; i < 10; i++) {
                         sleep(10)
                         def status = sh(
-                            script: "docker exec ansible-node1 curl -s -o /dev/null -w '%{http_code}' http://localhost:8070/health || echo '000'",
+                            script: "docker exec ansible-node1 curl -s -L -o /dev/null -w '%{http_code}' http://shopping-cart:8070/health || echo '000'",
                             returnStdout: true
                         ).trim()
                         echo "📊 Tentative ${i+1}/10 - Code HTTP : ${status}"
