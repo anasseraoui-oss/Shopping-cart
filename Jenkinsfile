@@ -13,12 +13,6 @@
 pipeline {
     agent any
 
-    tools {
-        jdk 'jdk-11'
-        maven 'maven3'
-        ansible 'ansible'
-    }
-
     environment {
         DOCKER_IMAGE    = 'anasseraoui/shopping-cart'
         DOCKER_TAG      = 'latest'
