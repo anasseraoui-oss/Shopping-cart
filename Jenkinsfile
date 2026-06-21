@@ -30,7 +30,9 @@ pipeline {
 
         stage('Git Checkout') {
             steps {
-                checkout scm
+                git branch: 'main',
+                    credentialsId: 'github-tokens',
+                    url: 'https://github.com/anasseraoui-oss/Shopping-cart.git'
             }
         }
 
@@ -43,12 +45,15 @@ pipeline {
         stage('OWASP Scan') {
             steps {
                 catchError(buildResult: 'SUCCESS', stageResult: 'FAILURE') {
-                    dependencyCheck additionalArguments: '''
-                        --scan ./
-                        --format XML
-                        --format HTML
-                        --out ./dependency-check-report
-                    ''', odcInstallation: 'OWASP-DC'
+                    withCredentials([string(credentialsId: 'NVD_API_KEY', variable: 'NVD_API_KEY')]) {
+                        dependencyCheck additionalArguments: """
+                            --scan ./
+                            --format XML
+                            --format HTML
+                            --out ./dependency-check-report
+                            --nvdApiKey ${NVD_API_KEY}
+                        """, odcInstallation: 'DP'
+                    }
                     dependencyCheckPublisher pattern: '**/dependency-check-report.xml'
                 }
             }
@@ -56,10 +61,13 @@ pipeline {
 
         stage('SonarQube Analysis') {
             steps {
-                withSonarQubeEnv('sonar-server') {
-                    sh '''mvn sonar:sonar \
-                    -Dsonar.projectName=Shopping-cart \
-                    -Dsonar.projectKey=Shopping-cart'''
+                withCredentials([string(credentialsId: 'SONAR_TOKEN', variable: 'SONAR_AUTH')]) {
+                    withSonarQubeEnv('sonar-server') {
+                        sh '''mvn org.sonarsource.scanner.maven:sonar-maven-plugin:4.0.0.4121:sonar \
+                        -Dsonar.projectName=Shopping-cart \
+                        -Dsonar.projectKey=Shopping-cart \
+                        -Dsonar.login=${SONAR_AUTH}'''
+                    }
                 }
             }
         }
@@ -175,10 +183,10 @@ pipeline {
 
         stage('Ansible Deploy') {
             steps {
-                // -vvv : verbose Ansible output for easier debugging in Jenkins console
                 ansiblePlaybook(
                     playbook: 'ansible/deploy.yml',
                     inventory: 'inventory.ini',
+                    credentialsId: 'ansible-ssh',
                     become: false,
                     colorized: true,
                     extras: '-vvv -e docker_image=${DOCKER_IMAGE}:${DOCKER_TAG}'
