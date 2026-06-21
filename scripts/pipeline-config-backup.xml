@@ -1,0 +1,181 @@
+﻿<?xml version='1.1' encoding='UTF-8'?>
+<flow-definition plugin="workflow-job@1571.1580.v18e46842c125">
+  <actions>
+    <org.jenkinsci.plugins.pipeline.modeldefinition.actions.DeclarativeJobAction plugin="pipeline-model-definition@2.2291.v2934911987b_6"/>
+    <org.jenkinsci.plugins.pipeline.modeldefinition.actions.DeclarativeJobPropertyTrackerAction plugin="pipeline-model-definition@2.2291.v2934911987b_6">
+      <jobProperties/>
+      <triggers/>
+      <parameters/>
+      <options/>
+    </org.jenkinsci.plugins.pipeline.modeldefinition.actions.DeclarativeJobPropertyTrackerAction>
+  </actions>
+  <description></description>
+  <keepDependencies>false</keepDependencies>
+  <properties/>
+  <definition class="org.jenkinsci.plugins.workflow.cps.CpsFlowDefinition" plugin="workflow-cps@4331.v9d06ed4658ff">
+    <script>pipeline {
+    agent any
+
+    environment {
+        DOCKER_IMAGE = &quot;anasseraoui/shopping-cart&quot;
+        DOCKER_TAG = &quot;latest&quot;
+        ANSIBLE_HOST_KEY_CHECKING = &apos;False&apos;
+        // Had l-lign ghadi t-bypassi biha l-mouchkil dyal known_hosts tqaniyan
+        ANSIBLE_SSH_ARGS = &apos;-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null&apos;
+    }
+
+    stages {
+
+        stage(&apos;Git Checkout&apos;) {
+            steps {
+                git branch: &apos;main&apos;,
+                    credentialsId: &apos;github-tokens&apos;,
+                    url: &apos;https://github.com/anasseraoui-oss/Shopping-cart.git&apos;
+            }
+        }
+
+        stage(&apos;Compile&apos;) {
+            steps {
+                sh &apos;mvn clean compile -DskipTests=true&apos;
+            }
+        }
+        
+        stage(&apos;OWASP Scan&apos;) {
+            steps {
+                catchError(buildResult: &apos;SUCCESS&apos;, stageResult: &apos;FAILURE&apos;) {
+                    withCredentials([string(credentialsId: &apos;NVD_API_KEY&apos;, variable: &apos;NVD_API_KEY&apos;)]) {
+                        dependencyCheck(
+                            additionalArguments: &quot;&quot;&quot;
+                                --scan ./
+                                --format XML
+                                --format HTML
+                                --out ./dependency-check-report
+                                --nvdApiKey ${NVD_API_KEY}
+                            &quot;&quot;&quot;,
+                            odcInstallation: &apos;DP&apos;
+                        )
+                    }
+                    dependencyCheckPublisher pattern: &apos;**/dependency-check-report.xml&apos;
+                }
+            }
+        }
+
+        stage(&apos;SonarQube Analysis&apos;) {
+            environment {
+                SONAR_AUTH = credentials(&apos;SONAR_TOKEN&apos;) 
+            }
+            steps {
+                withSonarQubeEnv(&apos;sonar-server&apos;) {
+                    // Utilisation de la version explicite du plugin pour Ã©viter le warning
+                    sh &apos;&apos;&apos;mvn org.sonarsource.scanner.maven:sonar-maven-plugin:4.0.0.4121:sonar \
+                    -Dsonar.projectName=Shopping-cart \
+                    -Dsonar.projectKey=Shopping-cart \
+                    -Dsonar.login=${SONAR_AUTH}&apos;&apos;&apos;
+                }
+            }
+        }
+
+        stage(&apos;Build&apos;) {
+            steps {
+                sh &apos;mvn clean package -DskipTests=true&apos;
+            }
+        }
+
+        stage(&apos;Docker Build &amp; Push&apos;) {
+            steps {
+                script {
+                    withCredentials([usernamePassword(credentialsId: &apos;docker-credentials&apos;, passwordVariable: &apos;DOCKER_PASSWORD&apos;, usernameVariable: &apos;DOCKER_USERNAME&apos;)]) {
+                        sh &apos;echo &quot;$DOCKER_PASSWORD&quot; | docker login -u &quot;$DOCKER_USERNAME&quot; --password-stdin&apos;
+                        sh &quot;docker build -t ${DOCKER_IMAGE}:${DOCKER_TAG} .&quot;
+                        sh &quot;docker push ${DOCKER_IMAGE}:${DOCKER_TAG}&quot;
+                        sh &apos;docker logout&apos;
+                    }
+                }
+            }
+        }
+        
+        stage(&apos;Ansible Preparation&apos;) {
+            steps {
+                script {
+                    // Connexion au rÃ©seau et PrÃ©paration Python
+                    echo &quot;ð Connecting Jenkins container to ansible-network...&quot;
+                    sh &quot;docker network connect ansible-network \$(hostname) || true&quot;
+                    echo &quot;ð Installing python3 on target node (ansible-node1) for Ansible...&quot;
+                    sh &quot;docker exec -u 0 ansible-node1 sh -c &apos;apt-get update &amp;&amp; apt-get install -y python3 || apk add --no-cache python3&apos;&quot;
+                }
+            }
+        }
+        stage(&apos;Ansible Deploy&apos;) {
+            steps {
+                ansiblePlaybook(
+                    playbook: &apos;ansible/deploy.yml&apos;,
+                    inventory: &apos;inventory.ini&apos;,
+                    credentialsId: &apos;ansible-ssh&apos;,
+                    become: false,
+                    colorized: true
+                )
+            }
+        }
+        stage(&apos;Health Check&apos;) {
+            steps {
+                script {
+                    echo &apos;â³ Attente du dÃ©marrage de Spring Boot (Polling sur 100s)...&apos;
+                    def isReady = false
+                    for (int i = 0; i &lt; 10; i++) {
+                        sleep(10)
+                        def status = sh(
+                            script: &quot;docker exec ansible-node1 curl -s -L -o /dev/null -w &apos;%{http_code}&apos; http://shopping-cart:8070/health || echo &apos;000&apos;&quot;,
+                            returnStdout: true
+                        ).trim()
+                        echo &quot;ð Tentative ${i+1}/10 - Code HTTP : ${status}&quot;
+                        if (status == &apos;200&apos;) { 
+                            isReady = true
+                            echo &apos;â Health Check rÃ©ussi ! L\&apos;application est joignable.&apos;
+                            break 
+                        }
+                    }
+                    if (!isReady) {
+                        echo &apos;â Health Check Ã©chouÃ©. RÃ©cupÃ©ration des logs du conteneur :&apos;
+                        sh &quot;docker exec ansible-node1 docker logs shopping-cart&quot;
+                        error &quot;Application unreachable after 100s&quot;
+                    }
+                }
+            }
+        }
+        stage(&apos;Metrics Check&apos;) {
+            steps {
+                script {
+                    echo &apos;ð VÃ©rification des mÃ©triques Prometheus...&apos;
+                    def metricsStatus = sh(
+                        script: &quot;docker exec ansible-node1 curl -s -o /dev/null -w &apos;%{http_code}&apos; http://localhost:8071/prometheus || echo &apos;FAILED&apos;&quot;,
+                        returnStdout: true
+                    ).trim()
+                    echo &quot;ð Code HTTP mÃ©triques : ${metricsStatus}&quot;
+                    if (metricsStatus != &apos;200&apos;) {
+                        echo &quot;â ï¸ MÃ©triques non accessibles sur port 8071 (Code: ${metricsStatus}) - vÃ©rification sur port 8070...&quot;
+                        sh &quot;docker exec ansible-node1 curl -s http://localhost:8070/prometheus || true&quot;
+                    } else {
+                        echo &apos;â MÃ©triques Prometheus accessibles !&apos;
+                    }
+                }
+            }
+        }
+    }
+    post {
+        success {
+            echo &apos;Pipeline Jenkins + Ansible terminÃ© avec succÃ¨s !&apos;
+        }
+        failure {
+            echo &apos;Pipeline Ã©chouÃ© !&apos;
+        }
+        always {
+            echo &apos;Pipeline terminÃ© !&apos;
+        }
+    }
+}
+</script>
+    <sandbox>true</sandbox>
+  </definition>
+  <triggers/>
+  <disabled>false</disabled>
+</flow-definition>

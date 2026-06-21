@@ -1,42 +1,14 @@
-<#
-.SYNOPSIS
-    Triggers a Jenkins pipeline from PowerShell and streams the full console output.
-
-.DESCRIPTION
-    Equivalent of trigger-jenkins-pipeline.sh for Windows users.
-    Uses jenkins-cli.jar to trigger a build and print live logs in the terminal.
-
-.PARAMETER JobName
-    Jenkins pipeline job name (e.g. "Shopping-Cart").
-
-.PARAMETER JenkinsUrl
-    Jenkins base URL (default: http://localhost:8082).
-
-.PARAMETER User
-    Jenkins username (default: admin).
-
-.PARAMETER Token
-    Jenkins API token. If omitted, reads $env:JENKINS_TOKEN.
-
-.PARAMETER CliJar
-    Path to jenkins-cli.jar (default: .\jenkins-cli.jar).
-
-.EXAMPLE
-    # Step 1: Generate API token at:
-    #   http://localhost:8082/user/admin/configure -> API Token -> Add new Token
-
-    # Step 2: Set token and trigger:
-    $env:JENKINS_TOKEN = "your-copied-token"
-    .\scripts\trigger-jenkins-pipeline.ps1 -JobName "Shopping-Cart"
-
-.EXAMPLE
-    # Pass token directly:
-    .\scripts\trigger-jenkins-pipeline.ps1 -JobName "Shopping-Cart" -Token "abc123"
-
-.NOTES
-    Requires Java installed and accessible in PATH.
-    Jenkins must be running on port 8082.
-#>
+# =============================================================================
+# trigger-jenkins-pipeline.ps1
+# =============================================================================
+# Triggers the Jenkins pipeline from PowerShell and streams console output.
+# Uses REST API (works on Windows; avoids Jenkins CLI WebSocket issues).
+#
+# Setup:
+#   1. Copy scripts/jenkins.local.env.example -> scripts/jenkins.local.env
+#   2. Set JENKINS_TOKEN (generate at http://localhost:8082/user/admin/configure)
+#   3. Run: .\scripts\trigger-jenkins-pipeline.ps1
+# =============================================================================
 
 param(
     [Parameter(Mandatory = $false, Position = 0)]
@@ -45,10 +17,11 @@ param(
     [string]$JenkinsUrl = "http://localhost:8082",
     [string]$User       = "admin",
     [string]$Token      = $env:JENKINS_TOKEN,
-    [string]$CliJar      = ".\jenkins-cli.jar"
+    [string]$PollSeconds = "10",
+    [int]$MaxWaitMinutes = "30"
 )
 
-# Load local config if present (scripts\jenkins.local.env is gitignored)
+# Load local config (gitignored)
 $localEnv = Join-Path $PSScriptRoot "jenkins.local.env"
 if (Test-Path $localEnv) {
     Get-Content $localEnv | ForEach-Object {
@@ -65,64 +38,102 @@ if (Test-Path $localEnv) {
     }
 }
 
-# ---------------------------------------------------------------------------
-# Validate API token
-# ---------------------------------------------------------------------------
 if (-not $Token) {
-    Write-Host ""
-    Write-Host "ERROR: Jenkins API token is required." -ForegroundColor Red
-    Write-Host ""
-    Write-Host "  How to generate an API token:" -ForegroundColor Yellow
-    Write-Host "    1. Open  http://localhost:8082"
-    Write-Host "    2. Log in as admin"
-    Write-Host "    3. Click admin (top-right) -> Configure"
-    Write-Host "    4. API Token -> Add new Token -> Generate -> Copy"
-    Write-Host ""
-    Write-Host "  Then run:" -ForegroundColor Yellow
-    Write-Host '    $env:JENKINS_TOKEN = "your-token"'
-    Write-Host "    .\scripts\trigger-jenkins-pipeline.ps1 -JobName `"Shopping-Cart`""
-    Write-Host ""
+    Write-Host "ERROR: Jenkins API token required." -ForegroundColor Red
+    Write-Host "Generate at: $JenkinsUrl/user/$User/configure -> API Token -> Add new Token"
+    Write-Host 'Then set: $env:JENKINS_TOKEN = "your-token"  OR edit scripts/jenkins.local.env'
     exit 1
 }
 
-# ---------------------------------------------------------------------------
-# Download jenkins-cli.jar if not present
-# ---------------------------------------------------------------------------
-if (-not (Test-Path $CliJar)) {
-    Write-Host ">>> Downloading jenkins-cli.jar from $JenkinsUrl ..."
-    Invoke-WebRequest -Uri "$JenkinsUrl/jnlpJars/jenkins-cli.jar" -OutFile $CliJar
-    Write-Host ">>> Saved to $CliJar"
+$cred    = New-Object PSCredential($User, (ConvertTo-SecureString $Token -AsPlainText -Force))
+$session = New-Object Microsoft.PowerShell.Commands.WebRequestSession
+
+function Get-JenkinsCrumb {
+    $resp = Invoke-WebRequest -Uri "$JenkinsUrl/crumbIssuer/api/json" -Credential $cred -WebSession $session -UseBasicParsing
+    return ($resp.Content | ConvertFrom-Json)
 }
 
-# ---------------------------------------------------------------------------
-# Trigger build and stream logs
-# ---------------------------------------------------------------------------
-$auth = "${User}:${Token}"
+function Start-JenkinsBuild {
+    param([string]$Job)
+    $crumb = Get-JenkinsCrumb
+    $headers = @{ $crumb.crumbRequestField = $crumb.crumb }
+    Invoke-WebRequest -Uri "$JenkinsUrl/job/$Job/build?delay=0sec" -Method Post `
+        -Credential $cred -WebSession $session -Headers $headers -UseBasicParsing | Out-Null
+}
+
+function Get-LastBuild {
+    param([string]$Job)
+    $resp = Invoke-WebRequest -Uri "$JenkinsUrl/job/$Job/lastBuild/api/json" -Credential $cred -UseBasicParsing
+    return ($resp.Content | ConvertFrom-Json)
+}
+
+function Get-BuildConsole {
+    param([string]$Job, [int]$Number)
+    $resp = Invoke-WebRequest -Uri "$JenkinsUrl/job/$Job/$Number/consoleText" -Credential $cred -UseBasicParsing
+    return $resp.Content
+}
 
 Write-Host ""
 Write-Host "============================================================"
-Write-Host "  Jenkins Pipeline Trigger"
-Write-Host "  URL     : $JenkinsUrl"
-Write-Host "  User    : $User"
-Write-Host "  Job     : $JobName"
-Write-Host "  Mode    : wait + stream logs (-f -s -v)"
+Write-Host "  Jenkins Pipeline Trigger (REST API)"
+Write-Host "  URL  : $JenkinsUrl"
+Write-Host "  User : $User"
+Write-Host "  Job  : $JobName"
 Write-Host "============================================================"
 Write-Host ""
 
-& java -jar $CliJar `
-    -s "$JenkinsUrl/" `
-    -auth $auth `
-    build $JobName `
-    -f -s -v
+$before = Get-LastBuild -Job $JobName
+$beforeNum = if ($before.number) { [int]$before.number } else { 0 }
 
-$exitCode = $LASTEXITCODE
+Write-Host ">>> Triggering build..."
+Start-JenkinsBuild -Job $JobName
 
-Write-Host ""
-if ($exitCode -eq 0) {
-    Write-Host ">>> BUILD SUCCESS: $JobName" -ForegroundColor Green
-} else {
-    Write-Host ">>> BUILD FAILED: $JobName (exit code $exitCode)" -ForegroundColor Red
-    Write-Host ">>> Check diagnostics output above for docker logs."
+# Wait for new build number
+$newBuildNum = $null
+for ($i = 0; $i -lt 30; $i++) {
+    Start-Sleep -Seconds 2
+    $last = Get-LastBuild -Job $JobName
+    if ($last.number -gt $beforeNum) {
+        $newBuildNum = [int]$last.number
+        break
+    }
 }
 
-exit $exitCode
+if (-not $newBuildNum) {
+    Write-Host "ERROR: Build was not queued." -ForegroundColor Red
+    exit 1
+}
+
+Write-Host ">>> Build #$newBuildNum started. Streaming console..."
+Write-Host ""
+
+$maxLoops = ($MaxWaitMinutes * 60) / [int]$PollSeconds
+$lastPrinted = 0
+
+for ($loop = 1; $loop -le $maxLoops; $loop++) {
+    $build = Invoke-WebRequest -Uri "$JenkinsUrl/job/$JobName/$newBuildNum/api/json" -Credential $cred -UseBasicParsing
+    $info  = ($build.Content | ConvertFrom-Json)
+    $console = Get-BuildConsole -Job $JobName -Number $newBuildNum
+    $lines = $console -split "`n"
+
+    if ($lines.Count -gt $lastPrinted) {
+        $lines[$lastPrinted..($lines.Count - 1)] | ForEach-Object { Write-Host $_ }
+        $lastPrinted = $lines.Count
+    }
+
+    if (-not $info.building) {
+        Write-Host ""
+        if ($info.result -eq "SUCCESS") {
+            Write-Host ">>> BUILD SUCCESS: $JobName #$newBuildNum" -ForegroundColor Green
+            exit 0
+        } else {
+            Write-Host ">>> BUILD FAILED: $JobName #$newBuildNum (result: $($info.result))" -ForegroundColor Red
+            exit 1
+        }
+    }
+
+    Start-Sleep -Seconds ([int]$PollSeconds)
+}
+
+Write-Host ">>> TIMEOUT waiting for build #$newBuildNum" -ForegroundColor Yellow
+exit 2

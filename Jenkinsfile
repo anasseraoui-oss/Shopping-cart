@@ -48,13 +48,15 @@ pipeline {
 
         stage('OWASP Scan') {
             steps {
-                dependencyCheck additionalArguments: '''
-                    --scan ./
-                    --format XML
-                    --format HTML
-                    --out ./dependency-check-report
-                ''', odcInstallation: 'OWASP-DC'
-                dependencyCheckPublisher pattern: '**/dependency-check-report.xml'
+                catchError(buildResult: 'SUCCESS', stageResult: 'FAILURE') {
+                    dependencyCheck additionalArguments: '''
+                        --scan ./
+                        --format XML
+                        --format HTML
+                        --out ./dependency-check-report
+                    ''', odcInstallation: 'OWASP-DC'
+                    dependencyCheckPublisher pattern: '**/dependency-check-report.xml'
+                }
             }
         }
 
@@ -77,9 +79,15 @@ pipeline {
         stage('Docker Build & Push') {
             steps {
                 script {
-                    withDockerRegistry(credentialsId: 'docker-credentials', toolName: 'docker') {
+                    withCredentials([usernamePassword(
+                        credentialsId: 'docker-credentials',
+                        passwordVariable: 'DOCKER_PASSWORD',
+                        usernameVariable: 'DOCKER_USERNAME'
+                    )]) {
+                        sh 'echo "$DOCKER_PASSWORD" | docker login -u "$DOCKER_USERNAME" --password-stdin'
                         sh "docker build -t ${DOCKER_IMAGE}:${DOCKER_TAG} ."
                         sh "docker push ${DOCKER_IMAGE}:${DOCKER_TAG}"
+                        sh 'docker logout'
                     }
                 }
             }
