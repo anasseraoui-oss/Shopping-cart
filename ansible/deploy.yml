@@ -1,49 +1,44 @@
 ---
 - name: Déploiement Shopping Cart avec Ansible
   hosts: webservers
-  become: yes          # Requis pour installer des paquets et gérer Docker
+  become: no
   connection: ssh
 
   vars:
     app_name: shopping-cart
     app_port: 8070
+    mgmt_port: 8071
     docker_image: "anasseraoui/shopping-cart:latest"
+    docker_network: "ansible-network"
 
   tasks:
-    - name: 1. Vérifier si Docker est déjà installé
+    - name: 1. Vérifier que Docker est disponible
       command: docker --version
-      register: docker_check
-      ignore_errors: yes
       changed_when: false
 
-    - name: 2. Installer Docker si absent (Ubuntu/Debian)
-      apt:
-        name: docker.io
-        state: present
-        update_cache: yes
-      when: docker_check.rc != 0
-
-    - name: 3. S'assurer que le service Docker est démarré
-      service:
-        name: docker
-        state: started
-        enabled: yes
-      when: docker_check.rc != 0
-
-    - name: 4. Nettoyage - Arrêter l'ancien conteneur s'il existe
+    - name: 2. Nettoyage - Arrêter l'ancien conteneur s'il existe
       shell: "docker stop {{ app_name }} || true"
 
-    - name: 5. Nettoyage - Supprimer l'ancien conteneur s'il existe
+    - name: 3. Nettoyage - Supprimer l'ancien conteneur s'il existe
       shell: "docker rm {{ app_name }} || true"
 
-    - name: 6. Pull - Télécharger la dernière version de l'image depuis Docker Hub
+    - name: 4. Pull - Télécharger la dernière image depuis Docker Hub
       shell: "docker pull {{ docker_image }}"
 
-    - name: 7. Run - Lancer le conteneur Spring Boot
+    - name: 5. Run - Lancer le conteneur Spring Boot sur ansible-network
       shell: |
         docker run -d \
           --name {{ app_name }} \
+          --network {{ docker_network }} \
           -p {{ app_port }}:8070 \
-          -p 8071:8071 \
+          -p {{ mgmt_port }}:8071 \
           --restart always \
           {{ docker_image }}
+
+    - name: 6. Vérifier que le conteneur tourne
+      shell: "docker ps --filter name={{ app_name }} --format '{{ '{{' }}.Status{{ '}}' }}'"
+      register: container_status
+
+    - name: 7. Afficher le statut du conteneur
+      debug:
+        msg: "Conteneur {{ app_name }} : {{ container_status.stdout }}"
